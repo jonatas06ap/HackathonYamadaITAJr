@@ -1,54 +1,37 @@
 """
-Bot de Poker — player_bigdaddy
-==============================
+Bot de Poker — player_bdHANDY (v2, Fase 2)
+==========================================
 
-COMO O BOT FUNCIONA (visão geral da estratégia)
-------------------------------------------------
-bigdaddy é um TAG (tight-aggressive) *exploitativo robusto* para heads-up. Ele
-combina quatro camadas:
+Um jogador profissional heads-up: Tight-Aggressive (TAG) com small-ball
+disciplinado e adaptacao por oponente entre partidas.
 
-1) MOTOR DE EQUITY (determinístico, < 50 ms). Usa o avaliador de mãos da engine
-   (cards.sequences) para achar a melhor mão de 5 cartas e estima a equity
-   combinando força da mão feita + equity de draws (outs) + desconto de textura
-   da mesa. Essa heurística CALIBRADA (que modela realização e range) é o motor
-   padrão. Há também um Monte-Carlo de equity embutido (avaliador inteiro rápido
-   + nº de amostras fixo, < 12 ms/decisão), mas DESLIGADO (flag USE_MC): testado,
-   o MC vs range uniforme superestima mãos fracas no heads-up e regrediu o
-   desempenho — fica reservado para uma futura variante "MC vs range estimado".
+Fase 2: nucleo escolhido por bake-off empirico contra o campo real (venceu a
+versao anterior por +9pp de WR medio). Sobre o nucleo TAG ha UMA melhoria de
+exploit, gatilhada por COMPORTAMENTO observado (nao por nome do oponente):
+o ramo "calling station" — quando o oponente paga muito nossos raises
+(fold_eq baixo) mas raramente toma a iniciativa, zeramos o blefe, afinamos e
+engrossamos o valor (ele paga com pior) e mantemos disciplina de fold contra a
+agressao polarizada dele (margem maior). E upside-only: so dispara com leitura
+de fold_eq baixa; contra qualquer outro perfil, joga o baseline TAG.
 
-   Detalhe importante desta engine: o "flop" já é distribuído ANTES da rodada
-   pré-flop, então nunca existe uma rodada com board vazio — sempre há 3+ cartas
-   na mesa. bigdaddy avalia uma mão real desde a primeira ação.
+Como ESTE motor realmente funciona (verificado em src/game/game.py):
+  - O flop (3 cartas) ja esta visivel na PRIMEIRA rodada de apostas. Os estados
+    de board sao: 3 cartas (duas rodadas), 4 cartas (turn), 5 cartas (river).
+    Logo, NAO existe "pre-flop as cegas": decidimos sempre com uma mao de 5
+    cartas formada. A selecao de maos e baseada em equity desde a 1a decisao.
+  - `current_bet` PERSISTE entre as ruas dentro da mesma mao (so zera a cada
+    nova mao). Quem so paga, paga `current_bet` (>= big blind) TODA rua — nao
+    existe check gratis pos-flop. Cada decisao e: pagar a aposta de pe, aumentar,
+    ou foldar. Por isso: foldar barato quando atras e pressionar com a aposta que
+    "carrega" para a proxima rua sao alavancas centrais.
+  - O dealer e o BIG BLIND e age por ULTIMO em todas as ruas (esta em posicao).
+    A posicao alterna a cada mao; nosso assento e fixo dentro de uma partida.
+  - Uma instancia nova e criada por partida, MAS o objeto de classe persiste por
+    todas as 2000 partidas de um confronto -> memoria de classe permite aprender
+    o oponente entre partidas (a alavanca contra os "nits").
 
-2) MODELO DO OPONENTE (adaptação dentro da partida, robusto a envenenamento).
-   EMA de dois tempos (rápido/lento) com filtro de "poison" e contador de
-   mudanças, estimando: com que frequência o oponente FOLDA à nossa aposta (por
-   street e por tamanho), com que frequência ELE é agressivo, qual o tamanho
-   típico de aposta dele e — via showdown — se ele BLEFA (quando pagamos a
-   agressão dele, com que frequência ganhamos). Nada é guardado entre partidas:
-   cada partida começa do mesmo ponto neutro e sólido (a Fase 1 é confronto
-   único, e isso impede que um oponente "nos prepare" entre rodadas).
-
-3) CAMADA EXPLORATIVA, *limitada e condicionada à confiança*. Quanto mais o
-   oponente folda, mais blefamos/c-betamos e maior o sizing por fold-equity;
-   contra calling-stations zeramos blefe e engrossamos o valor (value fino);
-   contra maníacos apertamos e pagamos light (trap). Cada desvio do baseline é
-   limitado em magnitude e só é acionado quando o estimador está confiante.
-
-4) BAIXA EXPLORABILIDADE (contra bots altamente adaptativos). Ranges
-   balanceados, decisões mistas (random), e SIZING ALEATORIZADO: o valor da
-   aposta parte do alvo baseado em equity/pote e recebe um jitter aleatório
-   (±EPS), descorrelacionando o tamanho da nossa força — assim um bot que
-   analisa nosso padrão de aposta não consegue ler a nossa mão. Se detectamos
-   que o oponente está mudando o comportamento EM RESPOSTA a nós (gap rápido vs
-   lento), descartamos a leitura velha e voltamos ao baseline neutro em vez de
-   perseguir o padrão.
-
-Curtos de fichas (< ~13 BB) entram em modo push/fold, pois os blinds dobram a
-cada 50 mãos e passividade perde.
-
-Restrições respeitadas: apenas stdlib + engine; O(21 avaliações de 5 cartas) por
-decisão; sem I/O; try/except global converte qualquer erro em call/check.
+Restricoes: apenas stdlib permitida + modulos da engine. Trabalho por decisao e
+limitado (<= 21 avaliacoes de 5 cartas) para nunca estourar o timeout de 50 ms.
 """
 from __future__ import annotations
 
@@ -65,9 +48,8 @@ from players.player import Player
 from game.game_view import GameView
 from cards.cards import Hand
 from cards.sequences import (
+    score_cinco_cartas,
     avaliar_cinco_cartas,
-    desempate_para_numero,
-    BASE_DESEMPATE,
     VALORES,
     RANK_CARTA_ALTA,
     RANK_UM_PAR,
@@ -77,27 +59,13 @@ from cards.sequences import (
     RANK_FLUSH,
     RANK_FULL_HOUSE,
     RANK_QUADRA,
-    RANK_STRAIGHT_FLUSH,
 )
 
 
-def _v(card) -> int:
-    return VALORES[card.value]
-
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return lo if x < lo else hi if x > hi else x
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  Avaliador de mão RÁPIDO (inteiros) + Monte Carlo de equity
-#  ---------------------------------------------------------------------------
-#  Cada carta vira um int = rank*4 + suit (rank 0..12 = 2..A, suit 0..3).
-#  _eval5 devolve um score comparável (categoria*BASE + desempate); _eval7 pega
-#  a melhor de 5 entre 7. Validado contra o avaliador da engine em 200k mãos
-#  (0 divergências de vencedor). É ~10x mais rápido que avaliar via Counter, o
-#  que viabiliza o Monte Carlo dentro do orçamento de 50 ms.
-# ═══════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Avaliador inteiro rapido (Tier 4: Monte Carlo de equity dentro do budget)
+#   carta -> int = rank*4 + naipe ; _eval5/_eval7 dao score comparavel.
+# ─────────────────────────────────────────────────────────────────────────────
 _R2I = {"2": 0, "3": 1, "4": 2, "5": 3, "6": 4, "7": 5, "8": 6, "9": 7,
         "10": 8, "J": 9, "Q": 10, "K": 11, "A": 12}
 _S2I = {"s": 0, "h": 1, "d": 2, "c": 3}
@@ -123,7 +91,7 @@ def _eval5(cs) -> int:
         if r[0] - r[4] == 4:
             straight = True
         elif r[0] == 12 and r[1] == 3 and r[2] == 2 and r[3] == 1 and r[4] == 0:
-            straight = True  # wheel A-2-3-4-5
+            straight = True
             high = 3
     if flush and straight:
         return 8 * _B5 + high
@@ -174,717 +142,541 @@ def _eval7(seven) -> int:
     return best
 
 
-class _RobustStat:
-    """EMA de dois tempos (rápido/lento) com filtro anti-envenenamento.
+# ─────────────────────────────────────────────────────────────────────────────
+# Modelo de oponente — acumulado entre partidas (memoria de classe)
+# ─────────────────────────────────────────────────────────────────────────────
+class _Opp:
+    """Estatisticas robustas e diretamente observaveis de um oponente.
 
-    - `fast` reage rápido, `slow` é a leitura estável que usamos.
-    - Amostras absurdas (muito distantes do `slow`, depois de algumas amostras)
-      são tratadas como possível camuflagem e entram com peso reduzido.
-    - `shifts` conta mudanças SUSTENTADAS de tendência: sinal de que o oponente
-      está se adaptando a nós — usado para reduzir nossos desvios (voltar ao
-      baseline) em vez de perseguir um padrão que ele controla.
-    """
-    __slots__ = ("fast", "slow", "n", "a_fast", "a_slow", "_streak", "_dir",
-                 "poison_hits", "shifts")
+    Nada de metricas "censuradas" (ex: 'meu pote grande venceu?'): so contamos
+    coisas que enxergamos com certeza dentro de decision()."""
 
-    def __init__(self, prior: float, a_fast: float = 0.30, a_slow: float = 0.07):
-        self.fast = prior
-        self.slow = prior
-        self.n = 0
-        self.a_fast = a_fast
-        self.a_slow = a_slow
-        self._streak = 0
-        self._dir = 0
-        self.poison_hits = 0
-        self.shifts = 0
+    def __init__(self) -> None:
+        self.hands = 0            # maos observadas
+        self.my_raises = 0        # vezes que NOS demos um raise que exigiu resposta
+        self.fold_to_raise = 0    # dessas, quantas o oponente foldou
+        self.opp_actions = 0      # decisoes do oponente observadas
+        self.opp_aggr = 0         # dessas, quantas foram raise/aposta do oponente
+        self.deep_hands = 0       # maos que chegaram a 4/5 cartas (turn/river)
+        self.ag_fast = 0.5        # T3: EMA rapida de agressao (reage rapido)
+        self.ag_slow = 0.5        # T3: EMA lenta (leitura estavel)
 
-    def update(self, x: float) -> None:
-        x = _clamp(x, 0.0, 1.0)
-        self.n += 1
-        poison = self.n >= 18 and abs(x - self.slow) > 0.6
-        if poison:
-            self.poison_hits += 1
-            self.fast += (self.a_fast * 0.25) * (x - self.fast)
-            return
-        self.fast += self.a_fast * (x - self.fast)
-        self.slow += self.a_slow * (x - self.slow)
-        d = self.fast - self.slow
-        cur_dir = 1 if d > 0.12 else (-1 if d < -0.12 else 0)
-        if cur_dir != 0 and cur_dir == self._dir:
-            self._streak += 1
-        elif cur_dir != 0:
-            self._dir = cur_dir
-            self._streak = 1
-        else:
-            self._dir = 0
-            self._streak = 0
-        if self._streak >= 4:
-            # mudança sustentada: acelera o slow e registra o shift
-            self.slow += 0.5 * (self.fast - self.slow)
-            self._streak = 0
-            self._dir = 0
-            self.shifts += 1
+    def shift(self) -> float:
+        """T3 (anti-poison): divergencia fast-slow = oponente MUDANDO de estilo
+        (ex.: camaleao que finge passividade e depois blefa). Usado p/ amortecer
+        nossos desvios e nao sermos envenenados."""
+        return abs(self.ag_fast - self.ag_slow)
 
-    def value(self) -> float:
-        return self.slow
+    # frequencia com que o oponente fica passivo/foldando vs nossa pressao
+    def fold_eq(self) -> float:
+        if self.my_raises < 1:
+            return 0.5
+        return self.fold_to_raise / self.my_raises
 
-    def confident(self, min_n: int = 12) -> bool:
-        return self.n >= min_n
+    def aggression(self) -> float:
+        if self.opp_actions < 1:
+            return 0.5
+        return self.opp_aggr / self.opp_actions
+
+    def deep_rate(self) -> float:
+        if self.hands < 1:
+            return 0.5
+        return self.deep_hands / self.hands
+
+    def archetype(self) -> str:
+        """Classifica so quando ha amostra suficiente; senao 'unknown'."""
+        if self.hands < 12 or self.my_raises < 6:
+            return "unknown"
+        fe = self.fold_eq()
+        ag = self.aggression()
+        if ag > 0.52:
+            return "maniac"
+        if fe > 0.58 and ag < 0.42:
+            return "nit"
+        if fe < 0.26:
+            return "station"
+        return "reg"
 
 
-class _OppProfile:
-    """Perfil de UM oponente, acumulado ao longo de TODA a partida-confronto
-    (2000 jogos rodam no mesmo processo; uma instância nova do bot é criada por
-    jogo, mas este perfil é de CLASSE e sobrevive). Permite aprendizado online
-    real: dentro de um jogo há só ~6-12 mãos, mas ao longo do confronto há
-    dezenas de milhares de mãos contra o MESMO oponente. Chaveado por nome ⇒ o
-    que aprendemos sobre um bot não afeta o jogo contra outro."""
-    __slots__ = ("games", "fold", "fold_street", "aggr", "betsize",
-                 "bluff_ema", "bluff_samples", "bigpot")
+class BdHandy(Player):
+    """TAG profissional com small-ball anti-nit e adaptacao por oponente."""
 
-    def __init__(self, bluff_prior: float):
-        self.games = 0
-        self.fold = _RobustStat(0.45)
-        self.fold_street = {s: _RobustStat(0.45) for s in (3, 4, 5)}
-        self.aggr = _RobustStat(0.30)
-        self.betsize = _RobustStat(0.6, a_fast=0.40, a_slow=0.12)
-        self.bluff_ema = bluff_prior
-        self.bluff_samples = 0
-        # win rate dos NOSSOS potes grandes (commitment ≥ ~50% do stack) contra
-        # este oponente. Baixo ⇒ ele só entra em pote grande com mão muito forte
-        # (nit, ex.: papa/tubarao) ⇒ devemos parar de dar all-in leve CONTRA ELE.
-        self.bigpot = _RobustStat(0.5)
+    # memoria compartilhada entre todas as partidas do confronto
+    _MEM: dict[str, _Opp] = {}
 
+    # ── parametros base (ajustaveis) ────────────────────────────────────────
+    _PUSHFOLD_BB = 12       # abaixo disso entra em push/fold
+    _BASE_BLUFF = 0.08      # frequencia base de blefe quando temos fold equity
+    _BASE_VALUE_THR = 0.58  # equity minima para tratar como value
+    _ODDS_MARGIN = 0.05     # folga exigida sobre pot odds para pagar
 
-class BigDaddy(Player):
-
-    # ── flags / hiperparâmetros ──────────────────────────────────────────────
-    SIZING_JITTER = False      # aleatoriza o tamanho da aposta (anti-leitura de padrão)
-    JITTER_EPS = 0.13          # amplitude do jitter (±13%)
-
-    # Monte Carlo de equity (mais preciso que a heurística de equity fixa).
-    # Nº de amostras por street (board=3/4/5) — fixo (não usa relógio: 'time'
-    # não está na whitelist) e conservador p/ caber em 50 ms mesmo em hardware
-    # lento. ~48 µs/amostra no flop ⇒ 160 amostras ≈ 8 ms (3× margem).
-    # DESLIGADO por padrão: testado empiricamente, o MC vs RANGE UNIFORME
-    # superestima mãos fracas no heads-up (lixo tem ~0.30 de equity por
-    # runner-runner) e nos faz pagar/continuar leve demais — regrediu forte
-    # contra bots exploráveis (ex.: bernardo 69%→62%) sem ajudar contra os
-    # difíceis. A heurística calibrada (realização + range) joga melhor. O
-    # motor MC fica pronto para uma futura versão "MC vs range ESTIMADO".
-    USE_MC = False
-    MC_TRIALS = {3: 160, 4: 200, 5: 260}
-    MC_BLEND = 1.0             # peso do MC vs heurística (1.0 = MC puro)
-    MC_MIN_N = 40             # abaixo disso, cai na heurística
-    _PUSHFOLD_BB = 13.0        # abaixo disso: modo push/fold
-
-    # bluff-catch (bônus de equity quando pagamos por suspeitar de blefe)
-    _BLUFF_ALPHA = 0.11
-    _BLUFF_PRIOR = 0.35
-    _BC_MAX = 0.17
-
-    # baselines de estratégia (TAG sólido) — ajustados adaptativamente
-    _BASE_VALUE_THRESH = 0.55
-    _BASE_BLUFF = 0.10
-    _BASE_ODDS_MARGIN = 0.07
-    _BASE_CBET = 0.78
-    _BASE_VALUE_SIZE = 0.62
-    _DISCOUNT_PAIR = 0.65
-
-    # ── APRENDIZADO ONLINE ENTRE JOGOS (per-opponent, downside-safe) ──────────
-    # Memória de CLASSE: sobrevive aos 2000 jogos do confronto (mesmo processo).
-    # Se o ambiente isolar processos, cada jogo começa "frio" e o bot joga o
-    # baseline — nunca pior. Todo desvio é condicionado à CONFIANÇA do perfil.
-    # DESLIGADO por padrão: a infraestrutura de aprendizado entre jogos funciona
-    # (ex.: joao_v2 +12pp na fase de exploit numa medição), MAS empiricamente
-    # REGREDIU o campo no geral. Motivo: tornar o modelo confiante entre jogos
-    # ativa adaptações que estavam (corretamente) dormentes com dados ralos — e
-    # algumas métricas adaptativas estão mal-calibradas (o proxy de fold lê ~0.00
-    # contra tight). Além disso o detector de "nit" é CENSURADO: a mão do busto
-    # (all-in perdido) nunca é registrada (não há mão seguinte para fechá-la),
-    # então o win rate de pote-grande lê alto demais e não identifica papa/tubarao.
-    # Tornar isto +EV exige recalibrar toda a camada adaptativa (projeto à parte).
-    # Com a flag OFF, cada jogo usa um perfil NOVO ⇒ comportamento = baseline.
-    _USE_CROSSGAME = False
-    _MEMORY: dict = {}
-    _EXPLORE_GAMES = 50        # 1ª fase: explora/observa; depois passa a explorar EV
-    _NIT_BIGPOT_N = 14         # amostras de pote-grande p/ confiar na leitura
-    _NIT_BIGPOT_THR = 0.42     # win rate de pote-grande abaixo disso ⇒ nit confirmado
-
-    # ── CAMUFLAGEM / ENVENENAMENTO (anti-profiler) ───────────────────────────
-    # Em alguns jogos (após o oponente ter tido tempo de nos modelar) jogamos um
-    # estilo CONTRASTANTE de propósito, para corromper o modelo que um profiler
-    # adversário constrói sobre nós. Off-policy: não atualizamos nosso modelo do
-    # oponente nesses jogos (não contaminamos nosso aprendizado).
-    _USE_CAMO = False
-    _CAMO_PROB = 0.06
-    _CAMO_MIN_GAMES = 25
+    # ── TOGGLES DE HARDENING ANTI-EXPLOIT (Fase 2) ───────────────────────────
+    # A/B-testaveis via test_tiers.py. Default: so o T1a (jitter) validado ON.
+    USE_SIZE_JITTER   = True    # T1a: descorrelaciona tamanho<->forca (VALIDADO)
+    USE_BOUNDARY_MIX  = False   # T1b: borra limiares call/fold/raise (anti-leitura)
+    USE_BLUFF_BALANCE = False   # T2 : range de blefe balanceado + bluff-catch
+    USE_ANTIPOISON    = False # T3 : amortece desvios qd opp muda de estilo (camaleao)
+    USE_RANGE_MC      = False  # T4 : equity por Monte Carlo (mistura no _equity)
 
     def __init__(self, name, hand, chips) -> None:
         super().__init__(name, hand, chips)
-        # posição / detecção de nova mão
-        self._my_seat: int | None = None
-        self._prev_board_len: int | None = None
-        self._prev_pot: int = -1
-        self.hands_seen = 0
+        self._my_seat: int | None = None     # assento absoluto (0/1), fixo na partida
+        self._opp: _Opp | None = None        # perfil do oponente (memoria de classe)
+        self._opp_name: str | None = None
 
-        # modelo do oponente (robusto). Defaults de instância = fallback seguro;
-        # em _bind_opp eles passam a APONTAR para o perfil de classe (cross-game).
-        self._mem: _OppProfile | None = None
-        self._opp_fold = _RobustStat(0.45)
-        self._opp_fold_street = {s: _RobustStat(0.45) for s in (3, 4, 5)}
-        self._opp_aggr = _RobustStat(0.30)
-        self._opp_betsize = _RobustStat(0.6, a_fast=0.40, a_slow=0.12)
-        self._camo = False         # este jogo é de camuflagem?
+        # estado da mao corrente
+        self._prev_board = -1
+        self._prev_pot = -1     # o pote so cresce dentro de uma mao; cai -> nova mao
+        self._hand_open = False
+        self._raised_this_hand = False        # demos algum raise nesta mao?
+        self._i_folded = False                # nos desistimos nesta mao?
+        self._saw_deep = False                # vimos board 4/5 nesta mao?
+        self._raise_board = -1                # nivel do board no nosso ultimo raise
+        self._last_seen_board = -1            # ultimo nivel de board em que agimos
+        self._start_chips = chips             # fichas no inicio da mao
 
-        # marcadores da mão atual (resetados a cada nova mão)
-        self._hand_start_chips: int | None = None
-        self._called_opp_aggr = False
-        self._we_bet_last = False
-        self._last_bet_street: int | None = None
-        self._max_board_len = 0
-        self._opp_aggr_this_hand = False
-        self._hand_commit_frac = 0.0   # maior fração do stack comprometida na mão
+    # ── utilidades de cartas ────────────────────────────────────────────────
+    @staticmethod
+    def _v(card) -> int:
+        return VALORES[card.value]
 
-        # cache de equity por estado (hand+board) dentro da decisão
-        self._eq_cache: dict = {}
-
-    def _bind_opp(self, name: str) -> None:
-        """Liga este jogo ao perfil de CLASSE do oponente (cria se for o 1º jogo).
-        Os estimadores passam a acumular ao longo de todo o confronto."""
-        if self._USE_CROSSGAME:
-            prof = BigDaddy._MEMORY.get(name)
-            if prof is None:
-                prof = _OppProfile(self._BLUFF_PRIOR)
-                BigDaddy._MEMORY[name] = prof
-        else:
-            prof = _OppProfile(self._BLUFF_PRIOR)  # perfil novo por jogo = baseline
-        self._mem = prof
-        self._opp_fold = prof.fold
-        self._opp_fold_street = prof.fold_street
-        self._opp_aggr = prof.aggr
-        self._opp_betsize = prof.betsize
-        prof.games += 1
-        # decide camuflagem deste jogo (off-policy): só depois que o oponente
-        # teve jogos suficientes para nos modelar.
-        self._camo = (self._USE_CAMO and prof.games >= self._CAMO_MIN_GAMES
-                      and random.random() < self._CAMO_PROB)
-
-    # ────────────────────────────────────────────────────────────────────── #
-    #  Estado / posição / aprendizado por mão
-    # ────────────────────────────────────────────────────────────────────── #
-    def _update_state(self, gv: GameView) -> None:
-        if self._mem is None:                      # 1º decisão do jogo: liga ao perfil
-            self._bind_opp(gv.opponents[0].name)
-        board_len = len(gv.board)
-        pot = gv.pot
-        opp = gv.opponents[0]
-
-        new_hand = (
-            self._prev_board_len is None
-            or board_len < self._prev_board_len
-            or (board_len == 3 and self._prev_board_len == 3 and pot < self._prev_pot)
-        )
-
-        if new_hand:
-            self._close_previous_hand(gv)
-            self.hands_seen += 1
-            self._hand_start_chips = gv.my_chips
-            self._called_opp_aggr = False
-            self._we_bet_last = False
-            self._last_bet_street = None
-            self._max_board_len = board_len
-            self._opp_aggr_this_hand = False
-            self._hand_commit_frac = 0.0
-            self._eq_cache.clear()
-
-        if board_len > self._max_board_len:
-            self._max_board_len = board_len
-
-        # detecção de assento (uma vez): se o oponente já investiu nesta rodada
-        # quando é a nossa vez no primeiro board=3, então agimos por último (dealer).
-        if self._my_seat is None and board_len == 3:
-            am_dealer = opp.current_bet_in_round > 0
-            self._my_seat = gv.dealer_position if am_dealer else (1 - gv.dealer_position)
-
-        # agressão do oponente nesta mão: enfrentar aposta real (> big blind)
-        if gv.to_call > gv.big_blind:
-            self._opp_aggr_this_hand = True
-
-        self._prev_board_len = board_len
-        self._prev_pot = pot
-
-    def _close_previous_hand(self, gv: GameView) -> None:
-        if self._hand_start_chips is None or self._mem is None:
-            return
-        delta = gv.my_chips - self._hand_start_chips
-        won = delta > 0
-        m = self._mem
-
-        # win rate dos NOSSOS potes grandes (sinal-chave anti-nit). Atualiza
-        # mesmo em camuflagem: é sobre a FORÇA dele em pote grande, não sobre nós.
-        if self._hand_commit_frac >= 0.5:
-            m.bigpot.update(1.0 if won else 0.0)
-
-        # Em jogo de camuflagem, NÃO contaminamos nosso modelo do oponente: a
-        # reação dele às nossas apostas anômalas não é representativa.
-        if self._camo:
-            self._opp_aggr.update(1.0 if self._opp_aggr_this_hand else 0.0)
-            return
-
-        # blefe do oponente: pagamos a agressão dele -> ganhamos? (1 = era batível)
-        if self._called_opp_aggr:
-            a = self._BLUFF_ALPHA
-            m.bluff_ema = (1.0 - a) * m.bluff_ema + a * (1.0 if won else 0.0)
-            m.bluff_samples += 1
-
-        # fold do oponente à NOSSA aposta: ganhamos sem chegar ao river
-        if self._we_bet_last:
-            opp_folded = won and self._max_board_len < 5
-            obs = 1.0 if opp_folded else 0.0
-            self._opp_fold.update(obs)
-            if self._last_bet_street is not None:
-                st = self._opp_fold_street.get(self._last_bet_street)
-                if st is not None:
-                    st.update(obs)
-
-        # frequência de agressão do oponente (por mão)
-        self._opp_aggr.update(1.0 if self._opp_aggr_this_hand else 0.0)
-
-    def _in_position(self, gv: GameView) -> bool:
-        # nesta engine o dealer age por último em TODA street -> dealer = posição
-        if self._my_seat is None:
-            return gv.opponents[0].current_bet_in_round > 0
-        return self._my_seat == gv.dealer_position
-
-    # ────────────────────────────────────────────────────────────────────── #
-    #  Motor de equity (determinístico e rápido)
-    # ────────────────────────────────────────────────────────────────────── #
-    def _best_made(self, cards):
-        best_score = -1
-        best = (RANK_CARTA_ALTA, [])
-        for combo in combinations(cards, 5):
-            rank, tb = avaliar_cinco_cartas(list(combo))
-            score = rank * BASE_DESEMPATE + desempate_para_numero(tb)
-            if score > best_score:
-                best_score = score
-                best = (rank, tb)
+    def _best_score(self, cards) -> int:
+        """Melhor score de 5 cartas dentre as `cards` (5, 6 ou 7 cartas)."""
+        if len(cards) < 5:
+            return 0
+        if len(cards) == 5:
+            return score_cinco_cartas(list(cards))
+        best = 0
+        for cinco in combinations(cards, 5):
+            s = score_cinco_cartas(list(cinco))
+            if s > best:
+                best = s
         return best
 
-    def _draw_outs(self, my_cards, board, made_rank) -> int:
-        if len(board) >= 5:
-            return 0
-        allcards = list(my_cards) + list(board)
-        vals = [_v(c) for c in allcards]
-        suits = [c.suit for c in allcards]
+    def _best_rank(self, cards) -> int:
+        """Rank (categoria) da melhor mao de 5 dentre `cards`."""
+        if len(cards) < 5:
+            return RANK_CARTA_ALTA
+        best_rank = -1
+        for cinco in combinations(cards, 5):
+            r, _ = avaliar_cinco_cartas(list(cinco))
+            if r > best_rank:
+                best_rank = r
+        return best_rank
+
+    def _count_outs(self, hole, board) -> int:
+        """Outs aproximados para flush/straight draw + overcards. Limitado."""
+        cards = list(hole) + list(board)
         outs = 0
-        scount = Counter(suits)
-        if any(c == 4 for c in scount.values()):
-            outs += 9  # flush draw
-        if made_rank < RANK_STRAIGHT:
-            present = set(vals)
-            vcount = Counter(vals)
-            if 14 in present:
-                present.add(1)
-                vcount[1] = vcount[14]
-            completing = set()
-            for low in range(1, 11):
-                window = set(range(low, low + 5))
-                missing = window - present
-                if len(missing) == 1:
-                    completing.add(next(iter(missing)))
-            s_outs = 0
-            for r in completing:
-                seen = vcount.get(r, 0)
-                s_outs += max(0, 4 - seen)
-            outs += min(s_outs, 8)
-        if made_rank == RANK_CARTA_ALTA and board:
-            max_b = max(_v(c) for c in board)
-            over = sum(1 for c in my_cards if _v(c) > max_b)
-            outs += over * 3  # overcards
+        # flush draw: 4 do mesmo naipe
+        suits = Counter(c.suit for c in cards)
+        for s, q in suits.items():
+            if q == 4:
+                outs = max(outs, 9)
+        # straight draw
+        vals = sorted({self._v(c) for c in cards})
+        # considera A como 1 tambem (wheel)
+        if 14 in vals:
+            vals = sorted(set(vals) | {1})
+        run_outs = 0
+        for low in range(1, 11):  # janelas de 5 valores consecutivos
+            window = set(range(low, low + 5))
+            have = len(window & set(vals))
+            if have == 4:
+                run_outs = max(run_outs, 8)  # open-ended-ish
+            elif have == 3 and run_outs < 4:
+                pass
+        outs = max(outs, run_outs)
+        # overcards (so quando nao temos par feito) — valor pequeno
         return min(outs, 15)
 
-    def _made_equity(self, made_rank, tb, my_vals, board_vals) -> float:
-        if made_rank == RANK_STRAIGHT_FLUSH: return 0.99
-        if made_rank == RANK_QUADRA: return 0.98
-        if made_rank == RANK_FULL_HOUSE: return 0.95
-        if made_rank == RANK_FLUSH: return 0.90
-        if made_rank == RANK_STRAIGHT: return 0.87
-        if made_rank == RANK_TRINCA: return 0.84
-        if made_rank == RANK_DOIS_PARES: return 0.74
-        if made_rank == RANK_UM_PAR:
-            pair_val = tb[0] if tb else 0
-            max_b = max(board_vals) if board_vals else 0
-            is_pocket = len(my_vals) == 2 and my_vals[0] == my_vals[1]
-            if is_pocket and pair_val > max_b:
-                return 0.72  # overpair
-            if pair_val >= max_b:
-                kicker = tb[1] if len(tb) > 1 else 0
-                return 0.60 + min(kicker, 14) * 0.005  # top pair (kicker)
-            second = sorted(board_vals)[-2] if len(board_vals) >= 2 else 0
-            if pair_val >= second:
-                return 0.50  # middle pair
-            return 0.42  # weak pair
-        high = max(my_vals) if my_vals else 2
-        return 0.18 + (high - 2) * 0.012  # high card
-
-    def _texture_discount(self, board) -> float:
-        if not board:
-            return 1.0
-        bvals = [_v(c) for c in board]
-        bsuits = [c.suit for c in board]
-        disc = 1.0
-        if len(bvals) != len(set(bvals)):
-            disc *= 0.92  # board pareado
-        if any(c >= 3 for c in Counter(bsuits).values()):
-            disc *= 0.88  # 3+ do mesmo naipe
-        uniq = sorted(set(bvals))
-        for i in range(len(uniq)):
-            run = [x for x in uniq if uniq[i] <= x <= uniq[i] + 4]
-            if len(run) >= 3:
-                disc *= 0.93  # board conectado
-                break
-        return disc
-
-    def _board_play_discount(self, my_cards, board, made: float) -> float:
-        """Corrige a superavaliação de mãos que vêm do BOARD. Numa board pareada
-        (trinca/quadra/dois pares na mesa), a 'mão feita' (ex.: quadra) pode ser
-        toda comunitária — nossas cartas só dão kicker, ou nem isso ('jogar o
-        board'). Sem essa correção o bot dá all-in com K-alto numa board JJJ ou
-        4-3 numa board 9999 e busta contra ranges tight. Usa o avaliador rápido."""
-        bl = len(board)
-        if bl < 4:
-            return made
-        bi = [_ci(c) for c in board]
-        mi = [_ci(c) for c in my_cards]
-        if bl == 5:
-            board_best = _eval5(bi)                 # melhor mão só com a mesa
-            full_best = _eval7(mi + bi)             # melhor mão com nossas cartas
-            if full_best == board_best:
-                return min(made, 0.12)              # jogamos o board (chop/perde)
-            if full_best // _B5 == board_best // _B5:
-                return min(made, 0.42)              # mesma categoria da mesa: só kicker
-        else:  # bl == 4 (turn): trinca/quadra na mesa e sem par próprio = kicker
-            from collections import Counter as _C
-            bc = _C(c >> 2 for c in bi)
-            mvr = [c >> 2 for c in mi]
-            if max(bc.values()) >= 3 and mvr[0] != mvr[1] and mvr[0] not in bc and mvr[1] not in bc:
-                return min(made, 0.45)
-        return made
-
-    def _mc_equity(self, gv: GameView):
-        """Equity REAL por Monte Carlo: amostra a mão do oponente (range
-        uniforme) + as cartas que faltam no board, e mede a fração de vitórias
-        (empate conta 0.5). Nº de amostras fixo por street. Retorna (eq, n)."""
-        my2 = [_ci(c) for c in gv.my_hand]
-        if len(my2) != 2:
-            return None, 0
-        board = [_ci(c) for c in gv.board]
-        bl = len(board)
-        known = set(my2) | set(board)
-        rem = [c for c in _ALL52 if c not in known]
-        ctc = 5 - bl  # cartas a vir
-        trials = self.MC_TRIALS.get(bl, 160)
-        sample = random.sample
-        win = 0.0
-        n = 0
-        if ctc == 0:
-            myscore = _eval7(my2 + board)
-            for _ in range(trials):
-                opp = sample(rem, 2)
-                osc = _eval7(opp + board)
-                win += 1.0 if myscore > osc else (0.5 if myscore == osc else 0.0)
-                n += 1
-        else:
-            need = 2 + ctc
-            for _ in range(trials):
-                s = sample(rem, need)
-                full = board + s[2:]
-                ms = _eval7(my2 + full)
-                osc = _eval7(s[:2] + full)
-                win += 1.0 if ms > osc else (0.5 if ms == osc else 0.0)
-                n += 1
-        return (win / n if n else None), n
-
+    # ── motor de equity (deterministico, barato) ────────────────────────────
     def _equity(self, gv: GameView):
-        key = (tuple(str(c) for c in gv.my_hand), tuple(str(c) for c in gv.board))
-        cached = self._eq_cache.get(key)
-        if cached is not None:
-            return cached
-        my_cards = list(gv.my_hand)
+        """Retorna (equity, rank, draw_equity, plays_board)."""
+        hole = list(gv.my_hand)
         board = list(gv.board)
-        rank, tb = self._best_made(my_cards + board)
-        my_vals = [_v(c) for c in my_cards]
-        board_vals = [_v(c) for c in board]
-        made = self._made_equity(rank, tb, my_vals, board_vals)
-        if rank <= RANK_TRINCA:
-            made *= self._texture_discount(board)
-        # corrige mãos que vêm do board (jogar o board / kicker-only)
-        if rank >= RANK_DOIS_PARES:
-            made = self._board_play_discount(my_cards, board, made)
-        outs = self._draw_outs(my_cards, board, rank)
-        cards_to_come = 2 if len(board) == 3 else (1 if len(board) == 4 else 0)
-        mult = 4 if cards_to_come == 2 else (2 if cards_to_come == 1 else 0)
-        draw_eq = _clamp(outs * mult / 100.0, 0.0, 0.90)
-        combo_blend = 0.03 if (outs >= 8 and made >= 0.45) else 0.0
-        heur_e = _clamp(max(made, draw_eq) + combo_blend, 0.02, 0.99)
+        cards = hole + board
+        bl = len(board)
 
-        # Equity principal: Monte Carlo (preciso); cai na heurística se MC raso.
-        e = heur_e
-        if self.USE_MC:
-            mc, n = self._mc_equity(gv)
-            if mc is not None and n >= self.MC_MIN_N:
-                e = _clamp(self.MC_BLEND * mc + (1.0 - self.MC_BLEND) * heur_e,
-                           0.02, 0.99)
-        result = (e, rank, draw_eq)
-        self._eq_cache[key] = result
-        return result
+        rank = self._best_rank(cards)
 
-    # ────────────────────────────────────────────────────────────────────── #
-    #  Parâmetros adaptativos (exploração limitada + anti-adaptação)
-    # ────────────────────────────────────────────────────────────────────── #
-    def _adapt_damp(self) -> float:
-        """Fator [0..1] que reduz desvios quando o oponente parece estar se
-        adaptando a nós (muitos shifts/poison) — voltamos ao baseline."""
-        shifts = self._opp_aggr.shifts + self._opp_fold.shifts
-        poison = self._opp_fold.poison_hits + self._opp_aggr.poison_hits
-        damp = 1.0 - 0.12 * shifts - 0.04 * poison
-        return _clamp(damp, 0.35, 1.0)
+        # "jogar o board": minha melhor mao usa 0 cartas da mao (so empata)
+        plays_board = False
+        if bl >= 5:
+            board_score = self._best_score(board)
+            full_score = self._best_score(cards)
+            if full_score <= board_score:
+                plays_board = True
 
-    def _params(self):
-        """Calcula os parâmetros de estratégia desta decisão a partir do modelo
-        robusto do oponente. Desvios são limitados e amortecidos."""
-        damp = self._adapt_damp()
-        vthr = self._BASE_VALUE_THRESH
-        bluff = self._BASE_BLUFF
-        margin = self._BASE_ODDS_MARGIN
-        cbet = self._BASE_CBET
-        vsize = self._BASE_VALUE_SIZE
+        made = self._made_equity(hole, board, rank)
+        if plays_board:
+            made = min(made, 0.16)
 
-        fold_conf = self._opp_fold.confident()
-        fr = self._opp_fold.value()
-        aggr_conf = self._opp_aggr.confident()
-        ar = self._opp_aggr.value()
+        # equity de draw (cartas por vir): board 3 -> 2 cartas, board 4 -> 1
+        draw_eq = 0.0
+        if bl < 5 and rank <= RANK_TRINCA:
+            outs = self._count_outs(hole, board)
+            mult = 4 if bl == 3 else 2
+            draw_eq = min(0.85, outs * mult / 100.0)
 
-        if fold_conf:
-            if fr < 0.28:           # calling-station: value pesado, sem blefe
-                bluff = 0.0
-                vsize += 0.20 * damp
-                vthr -= 0.05 * damp  # value mais fino contra quem paga demais
-                margin += 0.03 * damp
-            elif fr > 0.55:         # folder: blefa/c-beta mais, sizing maior
-                bluff = min(0.30, self._BASE_BLUFF * 2.4) * damp
-                cbet = min(0.95, cbet + 0.15 * damp)
-                vsize += 0.10 * damp
-            else:                   # equilibrado: blefe calibrado ao fold real
-                scale = _clamp((fr - 0.20) / 0.40, 0.0, 1.4)
-                bluff = self._BASE_BLUFF * scale * damp
-        else:
-            bluff *= 0.5  # sem leitura confiável: blefe contido
+        equity = max(made, made + 0.5 * max(0.0, draw_eq - 0.12))
+        # T4: mistura equity por Monte Carlo (vs range uniforme) nos spots com
+        # board >= 3. Mais preciso em spots fechados; gated por flag.
+        if self.USE_RANGE_MC and bl >= 3:
+            mc = self._mc_equity(hole, board, {3: 120, 4: 160, 5: 200}.get(bl, 120))
+            if mc is not None:
+                equity = 0.5 * equity + 0.5 * mc
+        equity = max(0.02, min(0.99, equity))
+        return equity, rank, draw_eq, plays_board
 
-        if aggr_conf and ar > 0.60:  # maníaco: aperta, paga light, blefa pouco
-            vthr += 0.04 * damp
-            margin = max(-0.02, margin - 0.04 * damp)
-            bluff *= 0.4
+    def _mc_equity(self, hole, board, trials):
+        """T4: equity REAL por Monte Carlo — amostra a mao do opp (range uniforme)
+        + cartas que faltam, mede a fracao de vitorias (empate=0.5). Avaliador
+        inteiro rapido (~50us/amostra) p/ caber no budget de 50 ms."""
+        try:
+            my2 = [_ci(c) for c in hole]
+            b = [_ci(c) for c in board]
+            known = set(my2) | set(b)
+            rem = [c for c in _ALL52 if c not in known]
+            need = 5 - len(b)
+            win = 0.0
+            sample = random.sample
+            for _ in range(trials):
+                s = sample(rem, 2 + need)
+                full = b + s[2:]
+                ms = _eval7(my2 + full)
+                os_ = _eval7(s[:2] + full)
+                win += 1.0 if ms > os_ else (0.5 if ms == os_ else 0.0)
+            return win / trials
+        except Exception:
+            return None
 
-        # CAMUFLAGEM: neste jogo jogamos um estilo contrastante de propósito para
-        # envenenar um profiler adversário. Alterna entre "maníaco" (solto-agressivo)
-        # e "rocha" (super-tight) por jogo, de forma determinística pelo nº do jogo.
-        if self._camo:
-            if (self._mem.games & 1) == 0:
-                bluff = 0.34; vthr = 0.46; cbet = 0.95; margin = -0.02  # maníaco
-            else:
-                bluff = 0.0; vthr = 0.66; cbet = 0.55; margin = 0.14    # rocha
+    def _made_equity(self, hole, board, rank) -> float:
+        """Equity heuristica da mao FEITA contra 1 oponente que continua."""
+        if rank >= RANK_QUADRA:
+            return 0.98
+        if rank == RANK_FULL_HOUSE:
+            return 0.93
+        if rank == RANK_FLUSH:
+            return 0.88
+        if rank == RANK_STRAIGHT:
+            return 0.82
+        if rank == RANK_TRINCA:
+            return 0.77
+        if rank == RANK_DOIS_PARES:
+            return 0.66
+        if rank == RANK_UM_PAR:
+            return self._pair_equity(hole, board)
+        # carta alta
+        hi = max(self._v(c) for c in hole)
+        return 0.24 + (hi - 2) * 0.010   # ~0.24..0.36
 
-        return dict(vthr=vthr, bluff=bluff, margin=margin, cbet=cbet, vsize=vsize,
-                    damp=damp)
+    def _pair_equity(self, hole, board) -> float:
+        """Distingue overpair / top / middle / weak / par de bolso baixo."""
+        board_vals = sorted((self._v(c) for c in board), reverse=True)
+        h0, h1 = self._v(hole[0]), self._v(hole[1])
+        pocket = (h0 == h1)
+        top_board = board_vals[0] if board_vals else 0
 
-    # ────────────────────────────────────────────────────────────────────── #
-    #  Ação
-    # ────────────────────────────────────────────────────────────────────── #
+        if pocket:
+            if h0 > top_board:
+                return 0.70          # overpair
+            return 0.46              # par de bolso abaixo do board
+        # par com o board: qual valor pareou?
+        paired_val = 0
+        for hv in (h0, h1):
+            if hv in board_vals:
+                paired_val = max(paired_val, hv)
+        kicker = max(h0, h1) if max(h0, h1) != paired_val else min(h0, h1)
+        if paired_val == 0:
+            return 0.30              # sem par real (fallback)
+        if paired_val >= top_board:
+            return 0.60 + min(0.06, (kicker - 9) * 0.01 if kicker > 9 else 0.0)
+        if paired_val >= (board_vals[1] if len(board_vals) > 1 else 0):
+            return 0.48              # middle pair
+        return 0.40                  # par fraco / baixo
+
+    # ── posicao ─────────────────────────────────────────────────────────────
+    def _in_position(self, gv: GameView) -> bool:
+        if self._my_seat is None:
+            return gv.opponents[0].current_bet_in_round > 0
+        return gv.dealer_position == self._my_seat
+
+    def _lock_seat(self, gv: GameView) -> None:
+        if self._my_seat is not None:
+            return
+        ip = gv.opponents[0].current_bet_in_round > 0
+        self._my_seat = gv.dealer_position if ip else (1 - gv.dealer_position)
+
+    # ── rastreio de mao / oponente ──────────────────────────────────────────
+    def _bind_opp(self, gv: GameView) -> None:
+        if self._opp is not None:
+            return
+        name = gv.opponents[0].name
+        self._opp_name = name
+        self._opp = BdHandy._MEM.setdefault(name, _Opp())
+
+    def _on_new_hand(self, gv: GameView) -> None:
+        """Fecha a mao anterior (atualiza fold equity) e abre uma nova."""
+        opp = self._opp
+        if opp is not None and self._hand_open:
+            opp.hands += 1
+            if self._saw_deep:
+                opp.deep_hands += 1
+            # so contamos fold equity em maos onde NOS demos um raise
+            if self._raised_this_hand:
+                opp.my_raises += 1
+                # se a mao terminou na MESMA rua do nosso ultimo raise (nao
+                # agimos numa rua mais avancada) e nao fomos nos que desistimos,
+                # entao o oponente foldou aquele raise. Captura folds em qualquer
+                # rua (flop/turn/river), nao so no board de 3 cartas.
+                if not self._i_folded and self._last_seen_board <= self._raise_board:
+                    opp.fold_to_raise += 1
+        # abre nova mao
+        self._hand_open = True
+        self._raised_this_hand = False
+        self._i_folded = False
+        self._saw_deep = False
+        self._raise_board = -1
+        self._last_seen_board = -1
+        self._start_chips = gv.my_chips
+
+    def _observe_opp(self, gv: GameView) -> None:
+        """Registra agressao do oponente nesta decisao."""
+        opp = self._opp
+        if opp is None:
+            return
+        opp.opp_actions += 1
+        # oponente foi agressivo se a aposta de pe passou de 1 big blind
+        aggr_now = (gv.current_bet > gv.big_blind
+                    and gv.opponents[0].current_bet_in_round >= gv.current_bet)
+        if aggr_now:
+            opp.opp_aggr += 1
+        a = 1.0 if aggr_now else 0.0          # T3: alimenta EMAs fast/slow
+        opp.ag_fast += 0.25 * (a - opp.ag_fast)
+        opp.ag_slow += 0.05 * (a - opp.ag_slow)
+
+    # ── helpers de aposta ───────────────────────────────────────────────────
+    def _raise_to(self, gv: GameView, pot_frac: float, min_extra_bb: int = 1) -> int:
+        """Calcula um total-da-rua para aumentar ~pot_frac do pote. Faz all-in se
+        o alvo cobre o stack. Garante exceder a aposta atual."""
+        bb = gv.big_blind
+        extra = max(min_extra_bb * bb, int(round(pot_frac * gv.pot)))
+        # ANTI-LEITURA (Fase 2): jitter no tamanho para DESCORRELACIONAR
+        # tamanho<->forca. Sem isto, nosso codigo publico revela "aposta grande =
+        # valor, aposta pequena = blefe" e um oponente adaptativo folda/flutua de
+        # graca. O jitter borra o limiar (valor e blefe passam a se sobrepor em
+        # tamanho) com custo de EV minimo (media ~1.0). Centro levemente > 1 para
+        # nao encolher o sizing medio de valor.
+        if self.USE_SIZE_JITTER:
+            extra = int(round(extra * random.uniform(0.82, 1.26)))
+            extra = max(min_extra_bb * bb, extra)
+        target = gv.current_bet + extra
+        # total que eu ainda preciso por nesta rua (ja investi current_bet-to_call)
+        my_invested = gv.current_bet - gv.to_call
+        needed = target - my_invested
+        if needed >= gv.my_chips:
+            return gv.my_chips + my_invested  # all-in (total da rua = tudo)
+        return target
+
+    def _call_or_fold(self, gv: GameView, equity: float, margin: float) -> int:
+        to_call = gv.to_call
+        if to_call <= 0:
+            return 0
+        pot_odds = to_call / (gv.pot + to_call)
+        if equity >= pot_odds + margin:
+            return 0
+        return -1
+
+    # ── decisao principal ───────────────────────────────────────────────────
     def decision(self, gv: GameView) -> int:
         try:
-            return self._decide(gv)
+            action = self._decide(gv)
+            if action == -1:
+                self._i_folded = True
+            return action
         except Exception:
-            return 0
+            return 0  # fallback seguro: call/check
 
     def _decide(self, gv: GameView) -> int:
-        self._update_state(gv)
+        self._lock_seat(gv)
+        self._bind_opp(gv)
 
-        to_call = gv.to_call
-        pot = gv.pot
-        cb = gv.current_bet
-        bb = max(1, gv.big_blind)
-        my_chips = gv.my_chips
-        opp_chips = gv.opponents[0].chips
         bl = len(gv.board)
+        # Deteccao de nova mao: dentro de uma mao o pote so cresce e o board so
+        # aumenta; uma queda no pote (reset para os blinds) ou no board marca uma
+        # mao nova. Isso captura tambem maos consecutivas que ficam no board de 3
+        # cartas (oponente foldou cedo) — caso que a deteccao por board perdia.
+        if self._prev_board < 0 or bl < self._prev_board or gv.pot < self._prev_pot:
+            self._on_new_hand(gv)
+        if bl >= 4:
+            self._saw_deep = True
+        self._prev_board = bl
+        self._prev_pot = gv.pot
+        self._last_seen_board = bl   # ultima rua em que efetivamente agimos
 
-        can_check = to_call == 0
-        facing_bet = to_call > 0
-        facing_real_bet = to_call > bb
+        self._observe_opp(gv)
+
+        equity, rank, draw_eq, plays_board = self._equity(gv)
         in_pos = self._in_position(gv)
+        to_call = gv.to_call
+        bb = gv.big_blind
+        eff_bb = gv.my_chips / max(1, bb)
 
-        e, rank, draw_eq = self._equity(gv)
-        e_raw = e
+        # Realidade desta engine + campo: nao ha check gratis e a aposta "carrega"
+        # entre ruas, e os oponentes valorizam muito e blefam pouco (agressao
+        # observada 0.03-0.15). Logo o correto e: tight, value pesado, blefe baixo
+        # e DISCIPLINA DE FOLD (margem alta sobre as pot odds — quem aposta forte
+        # aqui quase sempre TEM a mao). So afrouxamos a margem contra maniacos
+        # (que blefam) e aumentamos o roubo contra quem realmente folda demais.
+        ag = self._opp.aggression() if self._opp else 0.5
+        fe = self._opp.fold_eq() if self._opp else 0.5
+        known = self._opp.hands >= 12 if self._opp else False
 
-        p = self._params()
-        value_thresh = p["vthr"]
-        bluff_freq = p["bluff"]
-        odds_margin = p["margin"]
-        cbet_freq = p["cbet"]
-        value_frac = p["vsize"]
-        bluff_ok = bluff_freq > 0.0
+        bluff = self._BASE_BLUFF
+        value_thr = self._BASE_VALUE_THR
+        margin = 0.08              # base disciplinada: foldar para agressao
+        steal_frac = 0.50
+        value_frac = 0.72
+        anti_nit = False
 
-        # ── equity de CALL = desconto de range + bônus de bluff-catch + tells ──
-        e_call = e
-        if facing_real_bet:
-            self._opp_betsize.update(_clamp(to_call / max(pot, 1), 0.0, 1.0))
-            if rank <= RANK_UM_PAR:
-                e_call *= self._DISCOUNT_PAIR
+        if known and ag > 0.45:
+            # maniaco: blefa muito -> arma trap, paga mais leve, valoriza
+            arche = "maniac"
+            bluff = 0.03
+            margin = 0.0
+            value_thr = 0.56
+        elif known and ag < 0.12:
+            # value-bot passivo (papa/tubarao): aposta = forca. Foldar muito,
+            # quase nunca blefar; roubar so quando ele demonstra fraqueza.
+            arche = "nit"
+            anti_nit = True
+            bluff = 0.05
+            value_thr = 0.64
+            margin = 0.12          # paga so com folga grande -> nao paga value
+            if fe > 0.13:          # ele larga raises: rouba um pouco mais
+                bluff = 0.10
+        elif known and fe < 0.24 and ag < 0.45:
+            # CALLING STATION (ex.: Pinguim_Rei): paga nossos raises (fold_eq
+            # baixo) mas raramente toma a iniciativa. Logo NAO blefar (ele nao
+            # larga), valor FINO e mais grosso (ele paga com pior), e margem
+            # leve porque a agressao real dele e rara mas honesta. Gated so por
+            # fold_eq observado -> upside-only e robusto a outros oponentes.
+            arche = "station"
+            bluff = 0.0
+            value_thr = 0.50
+            value_frac = 0.80
+            margin = 0.10
+        else:
+            arche = "reg"
+            bluff = 0.08
+            value_thr = 0.58
+            margin = 0.07
+
+        # ── HARDENING ANTI-EXPLOIT (Fase 2, gated) ───────────────────────────
+        if self.USE_BLUFF_BALANCE:
+            # T2: nunca um range puro de valor (senao auto-foldam contra nos) +
+            # bluff-catch contra agressao (paga mais leve quem blefa muito).
+            if arche != "station":
+                bluff = max(bluff, 0.14)
+            if known and ag > 0.30:
+                margin = min(margin, 0.03)
+        if self.USE_ANTIPOISON and known:
+            # T3: encolhe desvios do baseline quando o opp esta mudando de estilo
+            # (fast vs slow divergem) -> camaleao nao consegue nos envenenar.
+            damp = max(0.4, 1.0 - 2.0 * self._opp.shift())
+            bluff = 0.08 + (bluff - 0.08) * damp
+            value_thr = 0.58 + (value_thr - 0.58) * damp
+            margin = 0.07 + (margin - 0.07) * damp
+        if self.USE_BOUNDARY_MIX:
+            # T1b: borra os limiares p/ nao serem lidos deterministicamente.
+            margin += random.uniform(-0.02, 0.02)
+            value_thr += random.uniform(-0.02, 0.02)
+
+        facing_bet = to_call > 0
+        real_bet = to_call > bb    # aposta acima do blind = agressao real
+        pot_odds = to_call / (gv.pot + to_call) if facing_bet else 0.0
+
+        # equity ajustada para PAGAR: o range que aposta forte e mais forte que
+        # o nosso quando so temos um par. Desconto por categoria + por tamanho.
+        e_call = equity
+        if real_bet:
+            if rank == RANK_UM_PAR:
+                e_call *= 0.72
             elif rank == RANK_DOIS_PARES:
-                e_call *= 0.85
-            if to_call > pot * 0.6:
-                e_call *= 0.85
-            size_ratio = to_call / max(pot, 1)
-            size_factor = _clamp(1.15 - size_ratio, 0.0, 1.0)
-            # bluff-catch: só credita blefe ACIMA de uma linha de base e com
-            # amostras suficientes — assim não pagamos light a quem só aposta valor
-            # (ex.: joao_v4 nunca blefa). Cresce com a evidência de blefe real.
-            bluff_signal = max(0.0, self._mem.bluff_ema - 0.25)
-            conf = _clamp(self._mem.bluff_samples / 6.0, 0.0, 1.0)
-            e_call = _clamp(e_call + self._BC_MAX * 1.6 * bluff_signal * size_factor * conf,
-                            0.02, 0.99)
-            # tell de tamanho: aposta muito acima do típico do opp = mais força
-            if self._opp_betsize.confident():
-                typ = self._opp_betsize.value()
-                cur = _clamp(size_ratio, 0.0, 1.0)
-                e_call = _clamp(e_call - (cur - typ) * 0.12, 0.02, 0.99)
+                e_call *= 0.88
+            if to_call > gv.pot * 0.6:
+                e_call *= 0.88
 
-        pot_odds = to_call / (pot + to_call) if to_call > 0 else 0.0
-        eff_bb = min(my_chips, opp_chips) / bb
-
-        # ── EXPLOIT per-opponent: NIT confirmado (aprendido entre jogos) ───────
-        # Só após a fase de exploração E com leitura confiante de que nossos
-        # potes grandes contra ELE perdem (papa/tubarao). Downside-safe: se o
-        # perfil não está maduro/confiante (ex.: processo isolado), nada dispara.
-        m = self._mem
-        nit = (m.games >= self._EXPLORE_GAMES
-               and m.bigpot.confident(self._NIT_BIGPOT_N)
-               and m.bigpot.value() < self._NIT_BIGPOT_THR)
-        cap_commit = nit and rank <= RANK_DOIS_PARES and e_raw < 0.90 \
-            and eff_bb >= self._PUSHFOLD_BB
-
-        # ── helpers de ação ───────────────────────────────────────────────────
-        def shove() -> int:
-            self._we_bet_last = True
-            self._last_bet_street = bl
-            self._hand_commit_frac = 1.0
-            return my_chips + cb
-
-        def raise_to(frac: float) -> int:
-            # tamanho-base pela fração do pote; depois JITTER aleatório para
-            # descorrelacionar o tamanho da nossa força (anti-leitura de padrão).
-            raise_over = frac * (pot + to_call)
-            if self.SIZING_JITTER:
-                raise_over *= random.uniform(1.0 - self.JITTER_EPS, 1.0 + self.JITTER_EPS)
-            raise_over = max(bb, int(round(raise_over)))
-            additional = to_call + raise_over
-            # vs NIT confirmado: não construir pote all-in com mão vulnerável
-            if cap_commit and additional > 0.45 * my_chips:
-                capped = max(bb, int(0.45 * my_chips) - to_call)
-                if capped < raise_over:
-                    raise_over = capped
-                    additional = to_call + raise_over
-            if additional >= my_chips:
-                return shove()
-            self._we_bet_last = True
-            self._last_bet_street = bl
-            self._hand_commit_frac = max(self._hand_commit_frac,
-                                         additional / max(1, my_chips))
-            return cb + raise_over
-
-        def do_call() -> int:
-            if facing_real_bet:
-                self._called_opp_aggr = True  # marca p/ aprender o bluff_ema
-            self._hand_commit_frac = max(self._hand_commit_frac,
-                                         min(to_call, my_chips) / max(1, my_chips))
-            return 0
-
-        # ══ PUSH/FOLD (stack curto) ════════════════════════════════════════════
+        # ── PUSH / FOLD (stack curto) ────────────────────────────────────────
         if eff_bb < self._PUSHFOLD_BB:
-            # vs NIT confirmado: range de all-in mais apertado (eles pagam tight)
-            shove_thr = (0.66 if nit else (0.50 if in_pos else 0.56))
-            if e_raw >= shove_thr or rank >= RANK_TRINCA or \
-                    (rank >= RANK_DOIS_PARES and not nit):
-                return shove()
-            if can_check:
+            shove_thr = 0.68 if anti_nit else (0.54 if in_pos else 0.58)
+            if equity >= shove_thr or rank >= RANK_TRINCA:
+                return self._mark_raise(gv.my_chips + (gv.current_bet - to_call))
+            if not facing_bet:
                 return 0
-            if e_call > pot_odds:
-                return do_call()
-            return -1
+            return 0 if e_call >= pot_odds else -1
 
-        # ══ STACK PROFUNDO ══════════════════════════════════════════════════════
-
-        # vs NIT confirmado: não pagar aposta que compromete grande parte do
-        # stack com mão vulnerável (eles só apostam grande com trinca+).
-        if cap_commit and facing_real_bet and to_call > 0.5 * my_chips:
-            return -1
-
-        # Valor forte (trinca+ ou equity muito alta)
-        if e_raw >= 0.72 or rank >= RANK_TRINCA:
-            # slowplay ocasional com monstro em posição para induzir blefe
-            if rank >= RANK_FULL_HOUSE and in_pos and facing_bet and random.random() < 0.3:
-                return do_call()
-            return raise_to(value_frac)
-
-        # Bom (top pair / overpair / equity média-alta)
-        if e_raw >= value_thresh:
-            if can_check:
-                return raise_to(value_frac) if random.random() < cbet_freq else 0
-            if e_call > pot_odds + odds_margin:
-                if in_pos and random.random() < 0.30:  # raise de proteção/valor
-                    return raise_to(value_frac)
-                return do_call()
-            return -1
-
-        # Draw forte: semi-blefe / call por odds
-        if draw_eq >= 0.30:
-            if can_check:
-                if bluff_ok and random.random() < 0.5:
-                    return raise_to(0.55)
+        # ── VALUE forte: trinca+ ou equity altissima -> construir pote ───────
+        if rank >= RANK_TRINCA or equity >= 0.85:
+            # slowplay ocasional em posicao com casa+/quadra para induzir
+            if in_pos and facing_bet and rank >= RANK_FULL_HOUSE and random.random() < 0.30:
                 return 0
-            if e_call > pot_odds:
-                if bluff_ok and random.random() < 0.4:
-                    return raise_to(0.55)
-                return do_call()
-            if pot_odds < 0.25 and random.random() < 0.5:
-                return do_call()  # implied odds
-            return -1
+            # contra nit com so trinca media, aposta controlada (nao "cego")
+            frac = value_frac if not anti_nit else 0.60
+            return self._mark_raise(self._raise_to(gv, frac))
 
-        # Marginal / fraco
-        if can_check:
-            # Oponente passou (check). Em POSIÇÃO (agimos por último), roubamos
-            # com alta frequência: os alvos foldam mão marginal à aposta, então
-            # apostar 0.5x pote é +EV sempre que o fold deles > ~33%. Fora de
-            # posição, stab esporádico para não inflar o pote com ar.
-            steal = bluff_freq
-            if in_pos and bluff_ok:
-                steal = max(steal, 0.50 * p["damp"])
-                if self._opp_fold.confident() and self._opp_fold.value() > 0.50:
-                    steal = min(0.82, steal + 0.25)
-            if bluff_ok and random.random() < steal:
-                return raise_to(0.55)
+        # ── VALUE medio: dois pares ou par forte ─────────────────────────────
+        if rank == RANK_DOIS_PARES or equity >= value_thr:
+            if not facing_bet:
+                frac = value_frac if not anti_nit else 0.55
+                return self._mark_raise(self._raise_to(gv, frac))
+            # enfrentando aposta: protege com raise so se barato, forte e nao-nit
+            if (not anti_nit and rank >= RANK_DOIS_PARES
+                    and to_call <= gv.pot * 0.6 and e_call >= pot_odds + 0.12
+                    and random.random() < 0.45):
+                return self._mark_raise(self._raise_to(gv, value_frac))
+            return 0 if e_call >= pot_odds + margin else -1
+
+        # ── DRAW forte: semi-blefe seletivo / pagar por odds ─────────────────
+        if draw_eq >= 0.32 and not anti_nit:
+            if not facing_bet:
+                if in_pos and random.random() < 0.40:
+                    return self._mark_raise(self._raise_to(gv, steal_frac))
+                return 0
+            if draw_eq >= pot_odds or to_call <= gv.pot * 0.25:
+                return 0
+            return -1
+        if draw_eq >= 0.32 and anti_nit:
+            # contra nit, paga draw so se MUITO barato (implied odds baixas)
+            if facing_bet and to_call <= gv.pot * 0.20:
+                return 0
+            return -1 if facing_bet else 0
+
+        # ── MARGINAL / AR ────────────────────────────────────────────────────
+        if not facing_bet:
+            # iniciativa (raro nesta engine): rouba so com fold equity real
+            steal_chance = bluff + (0.06 if in_pos else 0.0)
+            if random.random() < steal_chance:
+                return self._mark_raise(self._raise_to(gv, steal_frac))
+            return 0 if to_call <= 0 else -1
+
+        # enfrentando aposta com mao fraca: bluff-catch barato so se as contas
+        # fecham e o oponente nao e nit; senao fold disciplinado.
+        if not real_bet and e_call >= pot_odds + margin and not anti_nit:
             return 0
-        if facing_bet:
-            # bluff-catch: o bônus de blefe já está embutido em e_call
-            if e_call > pot_odds + odds_margin:
-                return do_call()
-            # blefe-raise raro em aposta pequena contra quem folda
-            if bluff_ok and to_call <= pot * 0.7 and random.random() < bluff_freq * 0.5:
-                return raise_to(0.6)
-            return -1
-        return 0
+        if (arche == "reg" and in_pos and to_call <= gv.pot * 0.4
+                and random.random() < bluff * 0.5):
+            return self._mark_raise(self._raise_to(gv, steal_frac))
+        return -1
+
+    def _mark_raise(self, total: int) -> int:
+        """Registra que demos um raise nesta mao (para medir fold equity).
+        Se o alvo nao supera a aposta atual, o motor trata como call -> nao conta."""
+        self._raised_this_hand = True
+        self._raise_board = self._prev_board   # nivel do board deste raise
+        return total
 
 
-def create_player(name: str = "player_bigdaddy") -> Player:
-    return BigDaddy(name, Hand(), 0)
+def create_player() -> Player:
+    return BdHandy("player_bdHANDY", Hand(), 0)
