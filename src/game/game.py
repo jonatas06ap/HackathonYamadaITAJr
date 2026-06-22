@@ -448,15 +448,18 @@ class Game:
         self.small_blind *= factor
         self.big_blind *= factor
 
-    def play_game(self) -> Player | None:
+    def play_game(self, max_hands: int = 1000) -> Player | None:
         """
         Roda uma partida completa (múltiplas mãos) até sobrar 1 jogador com chips.
-        Retorna o vencedor (Player).
+        Retorna o vencedor (Player). Se max_hands for atingido (blinds normalmente
+        forçam término antes de ~500 mãos), retorna o líder em chips.
         """
         while True:
             vivos = [p for p in self.players if p.chips > 0]
             if len(vivos) <= 1:
                 return vivos[0] if vivos else None
+            if self.hands_played >= max_hands:
+                return max(self.players, key=lambda p: p.chips)
 
             # Reset de estado da mão
             self.pot = 0
