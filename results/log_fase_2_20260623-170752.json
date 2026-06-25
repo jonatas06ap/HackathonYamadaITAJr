@@ -1,0 +1,242 @@
+{
+  "phase": "Fase 2",
+  "games_per_matchup": 2000,
+  "timestamp": "20260623-170752",
+  "n_bots": 8,
+  "matchups": [
+    {
+      "a": "AdaptiveMesgus",
+      "b": "NEMESIS",
+      "wins_a": 1071,
+      "wins_b": 929
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "ITABot",
+      "wins_a": 1893,
+      "wins_b": 107
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "player_bdHANDY",
+      "wins_a": 839,
+      "wins_b": 1161
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "PinguimHunter",
+      "wins_a": 882,
+      "wins_b": 1118
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "Super_Tubarao",
+      "wins_a": 508,
+      "wins_b": 1492
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "versao_13",
+      "wins_a": 553,
+      "wins_b": 1447
+    },
+    {
+      "a": "AdaptiveMesgus",
+      "b": "versao_14",
+      "wins_a": 460,
+      "wins_b": 1540
+    },
+    {
+      "a": "NEMESIS",
+      "b": "ITABot",
+      "wins_a": 1988,
+      "wins_b": 12
+    },
+    {
+      "a": "NEMESIS",
+      "b": "player_bdHANDY",
+      "wins_a": 772,
+      "wins_b": 1228
+    },
+    {
+      "a": "NEMESIS",
+      "b": "PinguimHunter",
+      "wins_a": 977,
+      "wins_b": 1023
+    },
+    {
+      "a": "NEMESIS",
+      "b": "Super_Tubarao",
+      "wins_a": 617,
+      "wins_b": 1383
+    },
+    {
+      "a": "NEMESIS",
+      "b": "versao_13",
+      "wins_a": 600,
+      "wins_b": 1400
+    },
+    {
+      "a": "NEMESIS",
+      "b": "versao_14",
+      "wins_a": 585,
+      "wins_b": 1415
+    },
+    {
+      "a": "ITABot",
+      "b": "player_bdHANDY",
+      "wins_a": 186,
+      "wins_b": 1814
+    },
+    {
+      "a": "ITABot",
+      "b": "PinguimHunter",
+      "wins_a": 104,
+      "wins_b": 1896
+    },
+    {
+      "a": "ITABot",
+      "b": "Super_Tubarao",
+      "wins_a": 227,
+      "wins_b": 1773
+    },
+    {
+      "a": "ITABot",
+      "b": "versao_13",
+      "wins_a": 247,
+      "wins_b": 1753
+    },
+    {
+      "a": "ITABot",
+      "b": "versao_14",
+      "wins_a": 32,
+      "wins_b": 1968
+    },
+    {
+      "a": "player_bdHANDY",
+      "b": "PinguimHunter",
+      "wins_a": 1112,
+      "wins_b": 888
+    },
+    {
+      "a": "player_bdHANDY",
+      "b": "Super_Tubarao",
+      "wins_a": 1232,
+      "wins_b": 768
+    },
+    {
+      "a": "player_bdHANDY",
+      "b": "versao_13",
+      "wins_a": 837,
+      "wins_b": 1163
+    },
+    {
+      "a": "player_bdHANDY",
+      "b": "versao_14",
+      "wins_a": 739,
+      "wins_b": 1261
+    },
+    {
+      "a": "PinguimHunter",
+      "b": "Super_Tubarao",
+      "wins_a": 690,
+      "wins_b": 1310
+    },
+    {
+      "a": "PinguimHunter",
+      "b": "versao_13",
+      "wins_a": 782,
+      "wins_b": 1218
+    },
+    {
+      "a": "PinguimHunter",
+      "b": "versao_14",
+      "wins_a": 719,
+      "wins_b": 1281
+    },
+    {
+      "a": "Super_Tubarao",
+      "b": "versao_13",
+      "wins_a": 787,
+      "wins_b": 1213
+    },
+    {
+      "a": "Super_Tubarao",
+      "b": "versao_14",
+      "wins_a": 682,
+      "wins_b": 1318
+    },
+    {
+      "a": "versao_13",
+      "b": "versao_14",
+      "wins_a": 791,
+      "wins_b": 1209
+    }
+  ],
+  "leaderboard": [
+    {
+      "rank": 1,
+      "name": "versao_14",
+      "matchup_wins": 7.0,
+      "total_matchups": 7,
+      "avg_wr": 0.7137142857142857,
+      "margin": 0.007487797433157496
+    },
+    {
+      "rank": 2,
+      "name": "versao_13",
+      "matchup_wins": 6.0,
+      "total_matchups": 7,
+      "avg_wr": 0.6417857142857143,
+      "margin": 0.007942523843212559
+    },
+    {
+      "rank": 3,
+      "name": "player_bdHANDY",
+      "matchup_wins": 5.0,
+      "total_matchups": 7,
+      "avg_wr": 0.5802142857142857,
+      "margin": 0.008175232070100517
+    },
+    {
+      "rank": 4,
+      "name": "Super_Tubarao",
+      "matchup_wins": 4.0,
+      "total_matchups": 7,
+      "avg_wr": 0.5853571428571429,
+      "margin": 0.008160929175038833
+    },
+    {
+      "rank": 5,
+      "name": "PinguimHunter",
+      "matchup_wins": 3.0,
+      "total_matchups": 7,
+      "avg_wr": 0.5082857142857143,
+      "margin": 0.0082813743786886
+    },
+    {
+      "rank": 6,
+      "name": "AdaptiveMesgus",
+      "matchup_wins": 2.0,
+      "total_matchups": 7,
+      "avg_wr": 0.4432857142857143,
+      "margin": 0.008229057637421188
+    },
+    {
+      "rank": 7,
+      "name": "NEMESIS",
+      "matchup_wins": 1.0,
+      "total_matchups": 7,
+      "avg_wr": 0.462,
+      "margin": 0.008258557162119784
+    },
+    {
+      "rank": 8,
+      "name": "ITABot",
+      "matchup_wins": 0.0,
+      "total_matchups": 7,
+      "avg_wr": 0.06535714285714286,
+      "margin": 0.00409412811230914
+    }
+  ]
+}
